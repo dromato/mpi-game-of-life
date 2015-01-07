@@ -1,19 +1,12 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <mpi.h>
-#include <math.h>
-#include <vector>
 #include <iostream>
-#include <math.h>
-#include <array>
-#include <time.h>
-#include <ctime>
+#include <chrono>
 
 using namespace std;
 
 // # Global parameters #
-static const int MAP_SIZE = 12;
-static const int N_OF_ITERATIONS = 5;
+static const int MAP_SIZE = 8000;
+static const int N_OF_ITERATIONS = 400;
 // # End of global parameters
 
 struct ExecutionEnviornment {
@@ -39,9 +32,11 @@ short* toVector(short** map);
 void freeMap(short** map, int width);
 void updateMap(short* mapAsVector, short** storedResults, int nOfProcesses, int workloadPerProcess);
 void printMap(short* mapAsVector);
+void printResponses(short** storedResults, int nOfProcesses, int workloadPerProcess);
+void printResponse(short* storedResults, int workloadPerProcess);
 // Calculations
 int countnNeighbours(short*, int);
-
+int countLiveCells(short* mapAsVector);
 
 int main(int argc, char *argv[]) {
 	MPI_Init(&argc, &argv);
@@ -64,36 +59,38 @@ void determineEnviornment(ExecutionEnviornment &excEnv) {
 
 void masterWork(ExecutionEnviornment excEnv) {
 	short* mapAsVector = generateMap();
-	cout << "[Master] :: map generated" << endl;
+	// printMap(mapAsVector);
 	int fullSize = MAP_SIZE * MAP_SIZE;
+	MPI_Request* sentRequests = (MPI_Request*) malloc(excEnv.numberOfProcesses * sizeof(MPI_Request));
+	MPI_Request* recivedRequests = (MPI_Request*) malloc(excEnv.numberOfProcesses * sizeof(MPI_Request));
 	MPI_Status status;
 	int workload = fullSize / (excEnv.numberOfProcesses - 1);
-	cout << "Workload : " << workload << endl;
 	short** storedResults = initMap(excEnv.numberOfProcesses, workload);
-	cout << "[Master] :: data generated" << endl;
-	// printMap(mapAsVector);
+
+	clock_t begin_pt = clock();
 
 	for(int i = 0; i < N_OF_ITERATIONS; i++) {
-		cout << "----- Iteration " << i << " -----" << endl;
 		for (int p = 1; p < excEnv.numberOfProcesses; p++) {
 			MPI_Send(mapAsVector, fullSize, MPI_SHORT, p, Tags::BROADCAST, MPI_COMM_WORLD);
-			cout << "[Master] :: sent REQUEST to " << p << endl;
+			// cout << "[Master] :: send REQUEST to " << p << endl;
 		}
 
 		for(int p = 1; p < excEnv.numberOfProcesses; p++) {
 			MPI_Recv(storedResults[p - 1], workload, MPI_SHORT, p, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-			cout << "[Master] :: got RESPONSE from " << p << endl;
+			// cout << "[Master] :: got RESPONSE from " << p << endl;
 		}
-
-		// updateMap(mapAsVector, storedResults, excEnv.numberOfProcesses, workload);
+		// printResponses(storedResults, excEnv.numberOfProcesses, workload);
+		updateMap(mapAsVector, storedResults, excEnv.numberOfProcesses, workload);
 		// printMap(mapAsVector);
 	}
 
 	// Terminate slaves
 	for(int p = 1; p < excEnv.numberOfProcesses; p++) {
-		MPI_Send(0, 0, MPI_SHORT, p, Tags::TERMINATE, MPI_COMM_WORLD);
-		cout << "[Master] :: sent TERMINATION SIGNAL to " << p << endl;
+		MPI_Isend(0, 0, MPI_SHORT, p, Tags::TERMINATE, MPI_COMM_WORLD, &sentRequests[p]);
 	}
+
+	cout << endl << "Living cells: " << countLiveCells(mapAsVector) << endl;
+	cout << endl << "Took  :  " << double(clock() - begin_pt) / CLOCKS_PER_SEC;
 }
 
 void slaveWork(ExecutionEnviornment excEnv) {
@@ -104,12 +101,13 @@ void slaveWork(ExecutionEnviornment excEnv) {
 	MPI_Status status;
 
 	while(1) {
-		cout << "[" << excEnv.idOfCurrentProcess << "] :: " << "WAITING." << endl;
-		int resultCode = MPI_Recv(&mapAsVector, fullSize, MPI_SHORT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		// cout << "[" << excEnv.idOfCurrentProcess << "] :: " << "WAITING." << endl;
+		MPI_Recv(mapAsVector, fullSize, MPI_SHORT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
-		cout <<  "[" << excEnv.idOfCurrentProcess << "] :: " << "got REQUEST." << endl;
+		// cout <<  "[" << excEnv.idOfCurrentProcess << "] :: " << "got REQUEST." << endl;
 
 		if(status.MPI_TAG == Tags::TERMINATE) {
+			// cout <<  "[" << excEnv.idOfCurrentProcess << "] :: " << "TERMINATING." << endl;
 			return;
 		}
 
@@ -126,7 +124,7 @@ void slaveWork(ExecutionEnviornment excEnv) {
 
 		// Sending results back to master
 		MPI_Send(result, workPerThread, MPI_SHORT, 0, Tags::CALCULATION, MPI_COMM_WORLD);
-		cout << "[" << excEnv.idOfCurrentProcess << "] :: " << "sent data." << endl;
+		// cout << "[" << excEnv.idOfCurrentProcess << "] :: " << "sent data." << endl;
 
 		free(result);
 	}
@@ -142,10 +140,9 @@ int countnNeighbours(short* mapAsVector, int currentPosition) {
 				continue;
 			}
 
-			if(mapAsVector[y * MAP_SIZE + x] == 1) count++;
+			if(mapAsVector[local_y * MAP_SIZE + local_x] == 1) count++;
 		}
 	}
-
 	return count;
 }
 
@@ -159,7 +156,7 @@ short* generateMap() {
 
 short** initMap(int width, int height) {
 	short** map = (short**) malloc(width * sizeof(short*));
-	for (int i = 0; i < width; ++i)
+	for (int i = 0; i < width; i++)
 		map[i] = (short*) malloc(height * sizeof(short));
 
 	return map;
@@ -215,4 +212,30 @@ void printMap(short* mapAsVector) {
 		}
 	}
 	cout << endl;
+}
+
+void printResponses(short** storedResults, int nOfProcesses, int workloadPerProcess) {
+	int globalPointer = 0;
+	for(int p = 0; p < nOfProcesses - 1; p++) { // We exclude master
+		cout << endl;
+		printResponse(storedResults[p], workloadPerProcess);
+	}
+	cout << endl;
+}
+
+void printResponse(short* storedResults, int workloadPerProcess) {
+	for(int localPointer = 0; localPointer < workloadPerProcess; localPointer++) {
+		cout << storedResults[localPointer] << "  ";
+	}
+
+	cout << endl;
+}
+
+int countLiveCells(short* mapAsVector) {
+	int count = 0;
+	for(int i = 0; i < MAP_SIZE * MAP_SIZE; i++) {
+		if(mapAsVector[i] == 1) count++;
+	}
+
+	return count;
 }
