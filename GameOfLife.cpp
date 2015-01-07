@@ -6,7 +6,7 @@ using namespace std;
 
 // # Global parameters #
 static const int MAP_SIZE = 8000;
-static const int N_OF_ITERATIONS = 200;
+static const int N_OF_ITERATIONS = 400;
 // # End of global parameters
 
 struct ExecutionEnviornment {
